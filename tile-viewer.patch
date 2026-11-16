@@ -1,0 +1,434 @@
+diff --git a/src/wx/gfxviewers.cpp b/src/wx/gfxviewers.cpp
+index dd9b06d991fefe48e9f029197e33a3aca0a305fe..691cb5acd107c3342383028385ecf552748a85b6 100644
+--- a/src/wx/gfxviewers.cpp
++++ b/src/wx/gfxviewers.cpp
+@@ -1556,7 +1556,7 @@ namespace Viewers {
+ class TileViewer : public GfxViewer {
+ public:
+     TileViewer()
+-        : GfxViewer(wxT("TileViewer"), 32 * 8, 32 * 8)
++        : GfxViewer(wxT("TileViewer"), 32 * 8, 32 * 8, true)
+     {
+         is256_ = charbase_ = 0;
+         getradio(, "Color16", is256_, 0);
+@@ -1573,7 +1573,8 @@ public:
+             palette_slider->Bind(wxEVT_SLIDER, std::bind(UpdateSliderTooltip, palette_slider, std::placeholders::_1));
+             palette_slider->Bind(wxEVT_ENTER_WINDOW, std::bind(UpdateSliderTooltipOnHover, palette_slider, std::placeholders::_1));
+         }
+-        getlab(tileno_, "Tile", "1WWW");
++        getlab(tileno_, "Tile", "1WWW ($WWW)");
++        tileno_->SetMinSize(tileno_->GetBestSize());
+         getlab(addr_, "Address", "06WWWWWW");
+         selx_ = sely_ = -1;
+         Fit();
+@@ -1646,7 +1647,7 @@ public:
+                 t *= 2;
+ 
+             wxString s;
+-            s.Printf(wxT("%d"), t);
++            s.Printf(wxT("%d ($%02X)"), t, static_cast<unsigned int>(t));
+             tileno_->SetLabel(s);
+             s.Printf(wxT("%08X"), 0x6000000 + charbase_ + 32 * t);
+             addr_->SetLabel(s);
+@@ -1757,7 +1758,7 @@ END_EVENT_TABLE()
+ class GBTileViewer : public GfxViewer {
+ public:
+     GBTileViewer()
+-        : GfxViewer(wxT("GBTileViewer"), 16 * 8, 16 * 8)
++        : GfxViewer(wxT("GBTileViewer"), 16 * 8, 16 * 8, true)
+     {
+         bank = charbase = 0;
+         getradio(, "Bank0", bank, 0);
+@@ -1776,7 +1777,8 @@ public:
+                 });
+             palette_slider->Bind(wxEVT_ENTER_WINDOW, std::bind(UpdateSliderTooltipOnHover, palette_slider, std::placeholders::_1));
+         }
+-        getlab(tileno, "Tile", "2WW");
++        getlab(tileno, "Tile", "2WW ($WW)");
++        tileno->SetMinSize(tileno->GetBestSize());
+         getlab(addr, "Address", "WWWW");
+         selx = sely = -1;
+         Fit();
+@@ -1818,7 +1820,7 @@ public:
+             int y = sely / 8;
+             int t = 16 * y + x;
+             wxString s;
+-            s.Printf(wxT("%d"), t);
++            s.Printf(wxT("%d ($%02X)"), t, static_cast<unsigned int>(t));
+             tileno->SetLabel(s);
+             s.Printf(wxT("%04X"), 0x8000 + charbase + 16 * t);
+             addr->SetLabel(s);
+diff --git a/src/wx/viewsupt.cpp b/src/wx/viewsupt.cpp
+index e5ec8ddfa458cea679fce21a4cf283cd42143f6c..5ca73485ae7c6c18ef3714a22a9905ce756379e3 100644
+--- a/src/wx/viewsupt.cpp
++++ b/src/wx/viewsupt.cpp
+@@ -1,5 +1,11 @@
+ #include "wx/viewsupt.h"
+ 
++#include <wx/display.h>
++
++#ifdef __WXMSW__
++#include <wx/msw/wrapwin.h>
++#endif
++
+ #include "wx/config/option-proxy.h"
+ #include "wx/config/user-input.h"
+ #include "wx/wxvbam.h"
+@@ -25,7 +31,7 @@ void Viewer::CloseDlg(wxCloseEvent& ev)
+     Destroy();
+ }
+ 
+-Viewer::Viewer(const wxString& name)
++Viewer::Viewer(const wxString& name, bool independent)
+     : wxDialog()
+     , auto_update(false)
+ {
+@@ -34,7 +40,7 @@ Viewer::Viewer(const wxString& name)
+ 
+     // using LoadDialog precludes non-wxDialog nodes, which is good
+     // since Viewer is strictly wxDialog-derived.
+-    if (!wxXmlResource::Get()->LoadDialog(this, f, name))
++    if (!wxXmlResource::Get()->LoadDialog(this, independent ? nullptr : f, name))
+         baddialog();
+ 
+     f->popups.push_back(this);
+@@ -1113,9 +1119,10 @@ EVT_LEFT_UP(GfxPanel::Click)
+ EVT_MOTION(GfxPanel::MouseMove)
+ END_EVENT_TABLE()
+ 
+-GfxViewer::GfxViewer(const wxString& dname, int maxw, int maxh)
+-    : Viewer(dname)
++GfxViewer::GfxViewer(const wxString& dname, int maxw, int maxh, bool independent)
++    : Viewer(dname, independent)
+     , image(maxw, maxh)
++    , zoom_(1)
+ {
+     gv = XRCCTRL(*this, "GfxView", GfxPanel);
+     if (!gv) {
+@@ -1128,6 +1135,7 @@ GfxViewer::GfxViewer(const wxString& dname, int maxw, int maxh)
+     }
+ 
+     gvs_->SetMinSize(gvs_->GetSize());
++    gvs_min_ = gvs_->GetSize();
+     gvs_->SetScrollRate(1, 1);
+     gv->SetSize(maxw, maxh);
+     gvs_->SetVirtualSize(maxw, maxh);
+@@ -1141,6 +1149,62 @@ GfxViewer::GfxViewer(const wxString& dname, int maxw, int maxh)
+ 
+     if (!str_)
+         baddialog();
++
++    if (auto* always_on_top = XRCCTRL(*this, "AlwaysOnTop", wxCheckBox)) {
++        wxGetApp().frame->Bind(wxEVT_ICONIZE, &GfxViewer::OnMainFrameIconize, this);
++        SetAlwaysOnTop(always_on_top->GetValue());
++        always_on_top->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent& event) {
++            SetAlwaysOnTop(event.IsChecked());
++        });
++    }
++
++    // optional zoom combo box (only present in some viewers)
++    wxComboBox* zoom = XRCCTRL(*this, "TileZoom", wxComboBox);
++
++    if (zoom) {
++        zoom->SetSelection(0);
++        zoom->Bind(wxEVT_COMBOBOX, &GfxViewer::ZoomSel, this);
++    }
++}
++
++void GfxViewer::SetAlwaysOnTop(bool enabled)
++{
++#ifdef __WXMSW__
++    // Ownership keeps the viewer above the emulator without making it
++    // topmost over other applications.
++    const auto window = GetHandle();
++    const auto owner = enabled ? wxGetApp().frame->GetHandle() : nullptr;
++    ::SetWindowLongPtrW(window, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(owner));
++    if (enabled && IsShown()) {
++        ::SetWindowPos(window, HWND_TOP, 0, 0, 0, 0,
++                       SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
++    }
++#else
++    const long style = GetWindowStyle();
++    SetWindowStyle(enabled ? style | wxSTAY_ON_TOP : style & ~wxSTAY_ON_TOP);
++#endif
++}
++
++void GfxViewer::OnMainFrameIconize(wxIconizeEvent& event)
++{
++    event.Skip();
++#ifdef __WXMSW__
++    // Windows already hides and restores owned viewers with the main window.
++    if (::GetWindow(GetHandle(), GW_OWNER))
++        return;
++#endif
++
++    if (event.IsIconized()) {
++        if (IsShown())
++            hidden_for_main_frame_ = Hide();
++    } else if (hidden_for_main_frame_) {
++        hidden_for_main_frame_ = false;
++#ifdef __WXMSW__
++        ShowWithoutActivating();
++#else
++        Show();
++#endif
++    }
+ }
+ 
+ void GfxViewer::ChangeBMP()
+@@ -1157,7 +1221,7 @@ void GfxViewer::BMPSize(int w, int h)
+         gv->bmh = h;
+ 
+         if (!str_->GetValue()) {
+-            gv->SetSize(w, h);
++            gv->SetSize(w * zoom_, h * zoom_);
+             gvs_->SetVirtualSize(gv->GetSize());
+         }
+     }
+@@ -1174,10 +1238,59 @@ void GfxViewer::StretchTog(wxCommandEvent& ev)
+         // second time to expand to outer edges
+         sz = gvs_->GetClientSize();
+     } else
+-        sz = wxSize(gv->bmw, gv->bmh);
++        sz = wxSize(gv->bmw * zoom_, gv->bmh * zoom_);
++
++    gv->SetSize(sz);
++    gvs_->SetVirtualSize(sz);
++}
++
++void GfxViewer::ZoomSel(wxCommandEvent& ev)
++{
++    int sel = ev.GetSelection();
+ 
++    if (sel < 0)
++        return;
++
++    zoom_ = sel + 1;
++    ApplyZoom();
++}
++
++void GfxViewer::ApplyZoom()
++{
++    // zooming and stretching are mutually exclusive
++    str_->SetValue(false);
++
++    wxSize sz(gv->bmw * zoom_, gv->bmh * zoom_);
++
++    // grow the view to show the zoomed tiles, but never beyond what fits
++    // on the screen (scrollbars take over past that point)
++    wxSize border = gvs_->GetSize() - gvs_->GetClientSize();
++    wxSize want = sz + border;
++    int disp = wxDisplay::GetFromWindow(this);
++    wxRect area = wxDisplay(disp == wxNOT_FOUND ? 0 : disp).GetClientArea();
++    want.DecTo(wxSize(area.GetWidth() * 3 / 4, area.GetHeight() * 3 / 4));
++    want.IncTo(gvs_min_);
++
++    gvs_->SetMinSize(want);
++    gvs_->SetSize(want);
+     gv->SetSize(sz);
+     gvs_->SetVirtualSize(sz);
++    gvs_->Scroll(0, 0);
++
++    // resize the dialog so the new view fits
++    wxSize fit = GetSizer()->ComputeFittingWindowSize(this);
++    SetMinSize(fit);
++
++    if (zoom_ == 1) {
++        SetSize(fit);
++    } else {
++        wxSize cur = GetSize();
++        cur.IncTo(fit);
++        SetSize(cur);
++    }
++
++    Layout();
++    gv->Refresh();
+ }
+ 
+ void GfxViewer::SaveBMP(wxCommandEvent& ev)
+diff --git a/src/wx/viewsupt.h b/src/wx/viewsupt.h
+index f827dc3fe548b2b35b28b00fa66adb99049eba9c..d6965b49c0441d06b35677f09b7eb36dbc5cca8e 100644
+--- a/src/wx/viewsupt.h
++++ b/src/wx/viewsupt.h
+@@ -27,7 +27,7 @@ namespace Viewers {
+ class Viewer : public wxDialog {
+ public:
+     void CloseDlg(wxCloseEvent& ev);
+-    Viewer(const wxString& name);
++    Viewer(const wxString& name, bool independent = false);
+     virtual ~Viewer()
+     {
+     }
+@@ -375,21 +375,28 @@ END_DECLARE_EVENT_TYPES()
+ // this is what actually manages the GfxPanel
+ class GfxViewer : public Viewer {
+ public:
+-    GfxViewer(const wxString& dname, int maxw, int maxh);
++    GfxViewer(const wxString& dname, int maxw, int maxh, bool independent = false);
+     void ChangeBMP();
+     void BMPSize(int w, int h);
+ 
+ protected:
+     void StretchTog(wxCommandEvent& ev);
++    void ZoomSel(wxCommandEvent& ev);
++    void ApplyZoom();
+     void RefreshEv(wxCommandEvent& ev);
+     void SaveBMP(wxCommandEvent& ev);
+     wxImage image;
+     GfxPanel* gv;
+ 
+ private:
++    void SetAlwaysOnTop(bool enabled);
++    void OnMainFrameIconize(wxIconizeEvent& event);
++    bool hidden_for_main_frame_ = false;
+     static wxString bmp_save_dir_;
+     wxScrolledWindow* gvs_;
+     wxCheckBox* str_;
++    int zoom_;           // integer zoom factor (1x - 6x)
++    wxSize gvs_min_;     // original minimum size of the scrolled view
+ 
+     DECLARE_EVENT_TABLE()
+ };
+diff --git a/src/wx/wxvbam.cpp b/src/wx/wxvbam.cpp
+index 8a720240482c4522eee58dfb3926ffd6ff065bfa..11a018619ace90b5fd8674c57bb630ec537d8e15 100644
+--- a/src/wx/wxvbam.cpp
++++ b/src/wx/wxvbam.cpp
+@@ -959,6 +959,14 @@ MainFrame::~MainFrame() {
+ #endif
+ }
+ 
++bool MainFrame::Destroy() {
++    // Independent tile viewers are not destroyed by wxFrame.
++    while (!popups.empty())
++        popups.front()->Close(true);
++
++    return wxFrame::Destroy();
++}
++
+ void MainFrame::SetStatusBar(wxStatusBar* menu_bar) {
+     wxFrame::SetStatusBar(menu_bar);
+     // This will take care of hiding the menu bar at startup, if needed.
+diff --git a/src/wx/wxvbam.h b/src/wx/wxvbam.h
+index c8409c1e49b37a8a93885b466fb13a8612f9c801..516a6fab46e1f85ef9f568e49f8fee4d341d1d86 100644
+--- a/src/wx/wxvbam.h
++++ b/src/wx/wxvbam.h
+@@ -200,6 +200,7 @@ class MainFrame : public wxFrame {
+ public:
+     MainFrame();
+     ~MainFrame() override;
++    bool Destroy() override;
+ 
+     bool BindControls();
+     void MenuOptionIntMask(const wxString& menuName, int field, int mask);
+diff --git a/src/wx/xrc/GBTileViewer.xrc b/src/wx/xrc/GBTileViewer.xrc
+index 9096a001e35b375c24a2bfef75fbc04498589d84..8efd5bb7ce296e87ff26812b18f59f904e888dde 100644
+--- a/src/wx/xrc/GBTileViewer.xrc
++++ b/src/wx/xrc/GBTileViewer.xrc
+@@ -1,6 +1,7 @@
+ <?xml version="1.0" encoding="UTF-8" standalone="yes" ?>
+ <resource xmlns="http://www.wxwidgets.org/wxxrc" version="2.5.3.0">
+   <object class="wxDialog" name="GBTileViewer">
++    <style>wxDEFAULT_DIALOG_STYLE|wxDIALOG_NO_PARENT</style>
+     <object class="wxBoxSizer">
+       <orient>wxVERTICAL</orient>
+       <object class="sizeritem">
+@@ -77,6 +78,43 @@
+                 <flag>wxBOTTOM|wxLEFT|wxRIGHT</flag>
+                 <border>5</border>
+               </object>
++              <object class="sizeritem">
++                <object class="wxCheckBox" name="AlwaysOnTop">
++                  <label>Always on _top</label>
++                  <checked>1</checked>
++                </object>
++                <flag>wxBOTTOM|wxLEFT|wxRIGHT</flag>
++                <border>5</border>
++              </object>
++              <object class="sizeritem">
++                <object class="wxBoxSizer">
++                  <orient>wxHORIZONTAL</orient>
++                  <object class="sizeritem">
++                    <object class="wxStaticText">
++                      <label>Zoom:</label>
++                    </object>
++                    <flag>wxRIGHT|wxALIGN_CENTRE_VERTICAL</flag>
++                    <border>5</border>
++                  </object>
++                  <object class="sizeritem">
++                    <object class="wxComboBox" name="TileZoom">
++                      <content>
++                        <item>1x</item>
++                        <item>2x</item>
++                        <item>3x</item>
++                        <item>4x</item>
++                        <item>5x</item>
++                        <item>6x</item>
++                      </content>
++                      <selection>0</selection>
++                      <style>wxCB_READONLY</style>
++                    </object>
++                    <flag>wxALIGN_CENTRE_VERTICAL</flag>
++                  </object>
++                </object>
++                <flag>wxBOTTOM|wxLEFT|wxRIGHT</flag>
++                <border>5</border>
++              </object>
+               <orient>wxVERTICAL</orient>
+             </object>
+             <flag>wxEXPAND</flag>
+diff --git a/src/wx/xrc/TileViewer.xrc b/src/wx/xrc/TileViewer.xrc
+index ec06887566f9f69f61beaabdd4df56939bcea185..97de67922ad446055cfe6a76bb6322f0a06f61b6 100644
+--- a/src/wx/xrc/TileViewer.xrc
++++ b/src/wx/xrc/TileViewer.xrc
+@@ -1,6 +1,7 @@
+ <?xml version="1.0" encoding="UTF-8" standalone="yes" ?>
+ <resource xmlns="http://www.wxwidgets.org/wxxrc" version="2.5.3.0">
+   <object class="wxDialog" name="TileViewer">
++    <style>wxDEFAULT_DIALOG_STYLE|wxDIALOG_NO_PARENT</style>
+     <title>Tile Viewer</title>
+     <object class="wxBoxSizer">
+       <orient>wxVERTICAL</orient>
+@@ -93,6 +94,43 @@
+                 <flag>wxBOTTOM|wxLEFT|wxRIGHT</flag>
+                 <border>5</border>
+               </object>
++              <object class="sizeritem">
++                <object class="wxCheckBox" name="AlwaysOnTop">
++                  <label>Always on _top</label>
++                  <checked>1</checked>
++                </object>
++                <flag>wxBOTTOM|wxLEFT|wxRIGHT</flag>
++                <border>5</border>
++              </object>
++              <object class="sizeritem">
++                <object class="wxBoxSizer">
++                  <orient>wxHORIZONTAL</orient>
++                  <object class="sizeritem">
++                    <object class="wxStaticText">
++                      <label>Zoom:</label>
++                    </object>
++                    <flag>wxRIGHT|wxALIGN_CENTRE_VERTICAL</flag>
++                    <border>5</border>
++                  </object>
++                  <object class="sizeritem">
++                    <object class="wxComboBox" name="TileZoom">
++                      <content>
++                        <item>1x</item>
++                        <item>2x</item>
++                        <item>3x</item>
++                        <item>4x</item>
++                        <item>5x</item>
++                        <item>6x</item>
++                      </content>
++                      <selection>0</selection>
++                      <style>wxCB_READONLY</style>
++                    </object>
++                    <flag>wxALIGN_CENTRE_VERTICAL</flag>
++                  </object>
++                </object>
++                <flag>wxBOTTOM|wxLEFT|wxRIGHT</flag>
++                <border>5</border>
++              </object>
+               <orient>wxVERTICAL</orient>
+             </object>
+             <flag>wxEXPAND</flag>

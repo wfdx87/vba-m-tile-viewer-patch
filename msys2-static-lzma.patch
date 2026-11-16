@@ -1,0 +1,13 @@
+diff --git a/src/wx/CMakeLists.txt b/src/wx/CMakeLists.txt
+index 69c05bb..e843e85 100644
+--- a/src/wx/CMakeLists.txt
++++ b/src/wx/CMakeLists.txt
+@@ -206,6 +206,8 @@ if(VBAM_STATIC AND MSYS)
+     foreach(lib ${wxWidgets_LIBRARIES})
+         if(lib STREQUAL "-llzma")
+             set(lib "liblzma.a")
++        elseif(lib MATCHES "liblzma[.]dll[.]a$")
++            string(REGEX REPLACE "liblzma[.]dll[.]a$" "liblzma.a" lib "${lib}")
+         endif()
+ 
+         list(APPEND cleaned_up_wx_libs "${lib}")
